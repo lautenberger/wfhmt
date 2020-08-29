@@ -1,0 +1,84 @@
+! *****************************************************************************
+PROGRAM MOVING_AVERAGE
+! *****************************************************************************
+! This program calculates a moving average (forward average) for a multiband
+! Raster
+
+USE VARS 
+USE IO
+USE SUBS
+
+IMPLICIT NONE
+
+INTEGER :: IBAND, IOS, IROW, ICOL, BANDSTART, BANDSTOP
+REAL :: MULT
+CHARACTER(400) :: FN, NAMELIST_FN
+
+NAMELIST /MOVING_AVERAGE_INPUTS/ INPUT_DIRECTORY, OUTPUT_DIRECTORY, INPUT_RASTER_FILENAME, OUTPUT_RASTER_FILENAME, NBANDS_TO_AVERAGE, PATH_TO_GDAL, SCRATCH
+
+!Begin by getting input file name:
+CALL GETARG(1,NAMELIST_FN)
+IF (NAMELIST_FN(1:1)==' ') THEN
+   WRITE(*,*) "Error, no input file specified."
+   WRITE(*,*) "Hit Enter to continue."
+   READ(5,*)
+   STOP
+ENDIF
+
+!Now read NAMELIST group:
+WRITE(*,*) 'Reading &MOVING_AVERAGE_INPUTS namelist group from ', TRIM(NAMELIST_FN)
+
+! Set defaults:
+CALL SET_NAMELIST_DEFAULTS
+
+! Open input file and read in namelist group
+OPEN(LUINPUT,FILE=TRIM(NAMELIST_FN),FORM='FORMATTED',STATUS='OLD',IOSTAT=IOS)
+IF (IOS .GT. 0) THEN
+   WRITE(*,*) 'Problem opening input file ', TRIM(NAMELIST_FN)
+   STOP
+ENDIF
+
+READ(LUINPUT,NML=MOVING_AVERAGE_INPUTS,END=100,IOSTAT=IOS)
+ 100  IF (IOS > 0) THEN
+         WRITE(*,*) 'Error: Problem with namelist group &MOVING_AVERAGE_INPUTS.'
+         STOP
+      ENDIF
+CLOSE(LUINPUT)
+
+!Get operating system (linux or windows/dos)
+CALL GET_OPERATING_SYSTEM
+
+!Get coordinate system string
+FN=TRIM(INPUT_DIRECTORY) // TRIM(INPUT_RASTER_FILENAME)
+CALL GET_COORDINATE_SYSTEM(FN)
+
+! Read input raster:
+FN=TRIM(INPUT_DIRECTORY) // TRIM(INPUT_RASTER_FILENAME)
+CALL READ_BIL_RASTER(INPUT_RASTER,FN)
+
+! Allocate output raster
+CALL ALLOCATE_EMPTY_RASTER(OUTPUT_RASTER ,INPUT_RASTER%NCOLS,INPUT_RASTER%NROWS,INPUT_RASTER%NBANDS,INPUT_RASTER%XLLCORNER,INPUT_RASTER%YLLCORNER,INPUT_RASTER%XDIM,INPUT_RASTER%YDIM,INPUT_RASTER%NODATA_VALUE,1,'FLOAT     ')
+
+! Now calculate moving average
+DO IBAND = 1, INPUT_RASTER%NBANDS
+   BANDSTART = IBAND
+   BANDSTOP  = MIN(INPUT_RASTER%NBANDS, BANDSTART + NBANDS_TO_AVERAGE - 1)
+   MULT = 1D0 / REAL(1 + BANDSTOP - BANDSTART)
+
+   DO IROW = 1, INPUT_RASTER%NROWS
+   DO ICOL = 1, INPUT_RASTER%NCOLS 
+      IF (ABS(INPUT_RASTER%RZT(IBAND,ICOL,IROW) - INPUT_RASTER%NODATA_VALUE) .GT. 0.1 ) THEN
+          OUTPUT_RASTER%RZT(IBAND,ICOL,IROW) = MULT * SUM(INPUT_RASTER%RZT(BANDSTART:BANDSTOP,ICOL,IROW))
+      ELSE
+         OUTPUT_RASTER%RZT(IBAND,ICOL,IROW) = INPUT_RASTER%NODATA_VALUE
+      ENDIF
+   ENDDO !ICOL
+   ENDDO !IROW
+ENDDO !IBAND
+
+! Now write moving average raster to disk:
+CALL WRITE_BIL_RASTER(OUTPUT_RASTER, OUTPUT_DIRECTORY, OUTPUT_RASTER_FILENAME,.TRUE., .TRUE.)
+
+! *****************************************************************************
+END PROGRAM MOVING_AVERAGE
+! *****************************************************************************

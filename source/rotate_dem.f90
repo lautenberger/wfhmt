@@ -1,0 +1,114 @@
+! *****************************************************************************
+PROGRAM ROTATE_DEM
+! *****************************************************************************
+! This program calculates wind speed and direction from u and v components
+
+USE VARS, ONLY : PIO180
+USE IO
+USE SUBS
+
+IMPLICIT NONE
+
+INTEGER :: IOS, IY, IX, NX, NY, ICOL, IROW
+REAL :: AOI_X, AOI_Y, SINE, COSINE, ROTATION_ANGLE, OUTPUT_XMIN, OUTPUT_YMIN,OUTPUT_XMAX, OUTPUT_YMAX, OUTPUT_CELLSIZE, &
+        X1, X2, Y1, Y2, XDIST, YDIST
+LOGICAL :: REVERSE_ROTATION
+CHARACTER(400) :: FN, NAMELIST_FN, INPUT_DEM_FILENAME, OUTPUT_DEM_FILENAME
+TYPE(RASTER_TYPE) :: INPUT_DEM, OUTPUT_DEM
+
+NAMELIST /ROTATE_DEM_INPUTS/ INPUT_DIRECTORY, OUTPUT_DIRECTORY, INPUT_DEM_FILENAME, OUTPUT_DEM_FILENAME, ROTATION_ANGLE, &
+                             OUTPUT_XMIN, OUTPUT_YMIN,OUTPUT_XMAX, OUTPUT_YMAX, OUTPUT_CELLSIZE, PATH_TO_GDAL, SCRATCH, &
+                             CONVERT_TO_GEOTIFF, COMPRESS, A_SRS, AOI_X, AOI_Y, REVERSE_ROTATION
+
+!Begin by getting input file name:
+CALL GETARG(1,NAMELIST_FN)
+IF (NAMELIST_FN(1:1)==' ') THEN
+   WRITE(*,*) "Error, no input file specified."
+   WRITE(*,*) "Hit Enter to continue."
+   READ(5,*)
+   STOP
+ENDIF
+
+!Now read NAMELIST group:
+WRITE(*,*) 'Reading &ROTATE_DEM_INPUTS namelist group from ', TRIM(NAMELIST_FN)
+
+! Set defaults:
+CALL SET_NAMELIST_DEFAULTS
+REVERSE_ROTATION = .FALSE. 
+
+! Open input file and read in namelist group
+OPEN(LUINPUT,FILE=TRIM(NAMELIST_FN),FORM='FORMATTED',STATUS='OLD',IOSTAT=IOS)
+IF (IOS .GT. 0) THEN
+   WRITE(*,*) 'Problem opening input file ', TRIM(NAMELIST_FN)
+   STOP
+ENDIF
+
+READ(LUINPUT,NML=ROTATE_DEM_INPUTS,END=100,IOSTAT=IOS)
+ 100  IF (IOS > 0) THEN
+         WRITE(*,*) 'Error: Problem with namelist group &ROTATE_DEM_INPUTS.'
+         STOP
+      ENDIF
+CLOSE(LUINPUT)
+
+!Get operating system (linux or windows/dos)
+CALL GET_OPERATING_SYSTEM
+
+!Get coordinate system string
+IF (TRIM(A_SRS) .EQ. 'null') THEN
+   FN=TRIM(INPUT_DIRECTORY) // TRIM(UWIND_FILENAME)
+   CALL GET_COORDINATE_SYSTEM(FN)
+ENDIF
+
+! Read input rasters:
+FN=TRIM(INPUT_DIRECTORY) // TRIM(INPUT_DEM_FILENAME)
+CALL READ_BIL_RASTER(INPUT_DEM,FN)
+
+! Allocate output raster:
+NX = NINT( (OUTPUT_XMAX - OUTPUT_XMIN) / OUTPUT_CELLSIZE  ) 
+NY = NINT( (OUTPUT_YMAX - OUTPUT_YMIN) / OUTPUT_CELLSIZE  ) 
+
+CALL ALLOCATE_EMPTY_RASTER(OUTPUT_DEM, NX, NY, 1, OUTPUT_XMIN, OUTPUT_YMIN, OUTPUT_CELLSIZE, OUTPUT_CELLSIZE, -9999.0, 2, 'FLOAT     ')   
+
+SINE   = SIN(ROTATION_ANGLE * PIO180)
+COSINE = COS(ROTATION_ANGLE * PIO180)
+
+DO IY = 1, INPUT_DEM%NROWS
+   IF (REVERSE_ROTATION) THEN
+      Y1 = INPUT_DEM%YLLCORNER + (REAL(IY) - 0.5) * INPUT_DEM%YDIM
+   ELSE
+      Y1 = INPUT_DEM%YLLCORNER + (REAL(IY) - 0.5) * INPUT_DEM%YDIM - AOI_Y
+   ENDIF
+
+   DO IX = 1, INPUT_DEM%NCOLS
+      IF (REVERSE_ROTATION) THEN
+         X1 = INPUT_DEM%XLLCORNER + (REAL(IX) - 0.5) * INPUT_DEM%XDIM
+      ELSE
+         X1 = INPUT_DEM%XLLCORNER + (REAL(IX) - 0.5) * INPUT_DEM%XDIM - AOI_X
+      ENDIF
+      IF (REVERSE_ROTATION) THEN
+         X2 = X1 * COSINE - Y1 * SINE + AOI_X
+         Y2 = Y1 * COSINE + X1 * SINE + AOI_Y
+      ELSE
+         X2 = X1 * COSINE - Y1 * SINE
+         Y2 = Y1 * COSINE + X1 * SINE
+      ENDIF
+
+      XDIST = X2 - OUTPUT_DEM%XLLCORNER
+      ICOL = CEILING(XDIST / OUTPUT_DEM%XDIM)
+      IF (ICOL .LT. 1 .OR. ICOL .GT. OUTPUT_DEM%NCOLS) CYCLE
+
+      YDIST = Y2 - OUTPUT_DEM%YLLCORNER
+      IROW = CEILING(YDIST / OUTPUT_DEM%YDIM)
+      IF (IROW .LT. 1 .OR. IROW .GT. OUTPUT_DEM%NROWS) CYCLE
+
+      OUTPUT_DEM%RZT(1,ICOL,IROW) = INPUT_DEM%RZT(1,IX,IY)
+
+   ENDDO !IX
+ENDDO !IY
+
+! Now write output dem to disk:
+CALL WRITE_BIL_RASTER(OUTPUT_DEM, OUTPUT_DIRECTORY, OUTPUT_DEM_FILENAME, CONVERT_TO_GEOTIFF, COMPRESS)
+
+! *****************************************************************************
+END PROGRAM ROTATE_DEM
+! *****************************************************************************

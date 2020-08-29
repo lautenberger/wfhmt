@@ -1,0 +1,156 @@
+! *****************************************************************************
+PROGRAM WIND_SPEED_AND_DIRECTION
+! *****************************************************************************
+! This program calculates wind speed and direction from u and v components
+
+USE VARS, ONLY : PI, UWIND
+USE IO
+USE SUBS
+
+IMPLICIT NONE
+
+INTEGER :: IBAND, IOS, IY, IX
+REAL :: UX, UY, WDNOW, ROTCON_P, LON_XX_P !, LAT_TAN_P
+REAL, ALLOCATABLE, DIMENSION(:,:) :: ANGLE2, SINX2, COSX2
+CHARACTER(20) :: MODEL_NAME
+CHARACTER(400) :: FN, NAMELIST_FN, LONGITUDE_FILE
+TYPE(RASTER_TYPE) :: LON
+
+NAMELIST /WIND_SPEED_AND_DIRECTION_INPUTS/ INPUT_DIRECTORY, OUTPUT_DIRECTORY, UWIND_FILENAME, VWIND_FILENAME, WS_FILENAME, WD_FILENAME, &
+                                           PATH_TO_GDAL, SCRATCH, CONVERT_TO_GEOTIFF, COMPRESS, ROTATE_WINDS, MODEL_NAME, LONGITUDE_FILE, &
+                                           A_SRS
+
+!Begin by getting input file name:
+CALL GETARG(1,NAMELIST_FN)
+IF (NAMELIST_FN(1:1)==' ') THEN
+   WRITE(*,*) "Error, no input file specified."
+   WRITE(*,*) "Hit Enter to continue."
+   READ(5,*)
+   STOP
+ENDIF
+
+!Now read NAMELIST group:
+WRITE(*,*) 'Reading &WIND_SPEED_AND_DIRECTION_INPUTS namelist group from ', TRIM(NAMELIST_FN)
+
+! Set defaults:
+CALL SET_NAMELIST_DEFAULTS
+
+! Open input file and read in namelist group
+OPEN(LUINPUT,FILE=TRIM(NAMELIST_FN),FORM='FORMATTED',STATUS='OLD',IOSTAT=IOS)
+IF (IOS .GT. 0) THEN
+   WRITE(*,*) 'Problem opening input file ', TRIM(NAMELIST_FN)
+   STOP
+ENDIF
+
+READ(LUINPUT,NML=WIND_SPEED_AND_DIRECTION_INPUTS,END=100,IOSTAT=IOS)
+ 100  IF (IOS > 0) THEN
+         WRITE(*,*) 'Error: Problem with namelist group &WIND_SPEED_AND_DIRECTION_INPUTS.'
+         STOP
+      ENDIF
+CLOSE(LUINPUT)
+
+!Get operating system (linux or windows/dos)
+CALL GET_OPERATING_SYSTEM
+
+!Get coordinate system string
+IF (TRIM(A_SRS) .EQ. 'null') THEN
+   FN=TRIM(INPUT_DIRECTORY) // TRIM(UWIND_FILENAME)
+   CALL GET_COORDINATE_SYSTEM(FN)
+ENDIF
+
+!! Read input rasters:
+!CALL READ_BSQ_RASTER(UWIND,INPUT_DIRECTORY,UWIND_FILENAME)
+!CALL READ_BSQ_RASTER(VWIND,INPUT_DIRECTORY,VWIND_FILENAME)
+
+FN=TRIM(INPUT_DIRECTORY) // TRIM(UWIND_FILENAME)
+CALL READ_BIL_RASTER(UWIND,FN)
+
+FN=TRIM(INPUT_DIRECTORY) // TRIM(VWIND_FILENAME)
+CALL READ_BIL_RASTER(VWIND,FN)
+
+IF (ROTATE_WINDS) THEN
+
+   FN = TRIM(LONGITUDE_FILE)
+   CALL READ_BIL_RASTER(LON, FN)
+
+   IF (TRIM(MODEL_NAME) .EQ. 'HRRR' ) THEN
+      ROTCON_P = 0.622515
+      LON_XX_P = -97.5
+!      LAT_TAN_P = 38.5
+   ENDIF
+
+   ALLOCATE(ANGLE2(1:UWIND%NROWS,1:UWIND%NCOLS))
+   ALLOCATE(SINX2 (1:UWIND%NROWS,1:UWIND%NCOLS))
+   ALLOCATE(COSX2 (1:UWIND%NROWS,1:UWIND%NCOLS))
+
+   DO IY = 1, UWIND%NROWS
+   DO IX = 1, UWIND%NCOLS 
+      ANGLE2(IX,IY) = 0.017453 * ROTCON_P * (LON%RZT(1,IX,IY) - LON_XX_P)
+      SINX2(IX,IY) = SIN(ANGLE2(IX,IY))
+      COSX2(IX,IY) = COS(ANGLE2(IX,IY))
+   ENDDO
+   ENDDO
+
+ENDIF
+
+! Allocate wind speed and direction rasters
+CALL ALLOCATE_EMPTY_RASTER(WS ,UWIND%NCOLS,UWIND%NROWS,UWIND%NBANDS,UWIND%XLLCORNER,UWIND%YLLCORNER,UWIND%XDIM,UWIND%YDIM,UWIND%NODATA_VALUE,1,'FLOAT     ')
+CALL ALLOCATE_EMPTY_RASTER(WD ,UWIND%NCOLS,UWIND%NROWS,UWIND%NBANDS,UWIND%XLLCORNER,UWIND%YLLCORNER,UWIND%XDIM,UWIND%YDIM,UWIND%NODATA_VALUE,1,'FLOAT     ')
+
+!** ROTCON_P R WIND ROTATION CONSTANT, = 1 FOR POLAR STEREO
+!** AND SIN(LAT_TAN_P) FOR LAMBERT CONFORMAL
+!** LON_XX_P R MERIDIAN ALIGNED WITH CARTESIAN X-AXIS(DEG)
+!** LAT_TAN_P R LATITUDE AT LAMBERT CONFORMAL PROJECTION
+!** IS TRUE (DEG)
+
+! Now calculate ws and wd
+DO IBAND = 1, UWIND%NBANDS
+   DO IY = 1, UWIND%NROWS
+   DO IX = 1, UWIND%NCOLS 
+      IF (ABS(UWIND%RZT(IBAND,IX,IY) - UWIND%NODATA_VALUE) .GT. 0.1 .AND. &
+          ABS(VWIND%RZT(IBAND,IX,IY) - VWIND%NODATA_VALUE) .GT. 0.1) THEN
+          UX = UWIND%RZT(IBAND,IX,IY)
+          UY = VWIND%RZT(IBAND,IX,IY)
+
+          WS%RZT(IBAND,IX,IY) = SQRT(UX*UX + UY*UY)
+          
+          IF (ROTATE_WINDS) THEN
+             UX =  COSX2(IX,IY) * UX + SINX2(IX,IY) * UY
+             UY = -SINX2(IX,IY) * UX + COSX2(IX,IY) * UY
+          ENDIF
+
+          IF      (UX .EQ. 0. .AND. UY .EQ. 0.) THEN 
+             WDNOW = 0.
+          ELSE IF (UX .GT. 0. .AND. UY .EQ. 0.) THEN
+             WDNOW = 0.5*PI
+          ELSE IF (UX .LT. 0. .AND. UY .EQ. 0.) THEN          
+             WDNOW = 1.5*PI          
+          ELSE IF (UX .EQ. 0. .AND. UY .GT. 0.) THEN
+             WDNOW = 0.0*PI
+          ELSE IF (UX .EQ. 0. .AND. UY .LT. 0.) THEN          
+             WDNOW = 1.0*PI
+          ELSE
+             IF (UX .GT. 0. .AND. UY .GT. 0.) WDNOW = 0.     + ATAN(  UX /  UY ) 
+             IF (UX .GT. 0. .AND. UY .LT. 0.) WDNOW = 0.5*PI + ATAN( -UY /  UX )
+             IF (UX .LT. 0. .AND. UY .LT. 0.) WDNOW = PI     + ATAN(  UX /  UY )
+             IF (UX .LT. 0. .AND. UY .GT. 0.) WDNOW = 1.5*PI + ATAN(  UY / ABS(UX) )
+          ENDIF
+          WDNOW = WDNOW * 180. / PI
+          WDNOW = WDNOW + 180. 
+          IF (WDNOW .GT. 360) WDNOW = WDNOW - 360.
+          WD%RZT(IBAND,IX,IY) = WDNOW
+      ELSE
+         WS%RZT(IBAND,IX,IY) = UWIND%NODATA_VALUE
+         WD%RZT(IBAND,IX,IY) = UWIND%NODATA_VALUE         
+      ENDIF
+   ENDDO !IX
+   ENDDO !IY
+ENDDO !IBAND
+
+! Now write ws20 and wd20 rasters to disk:
+CALL WRITE_BIL_RASTER(WS, OUTPUT_DIRECTORY, WS_FILENAME, CONVERT_TO_GEOTIFF, COMPRESS)
+CALL WRITE_BIL_RASTER(WD, OUTPUT_DIRECTORY, WD_FILENAME, CONVERT_TO_GEOTIFF, COMPRESS)
+
+! *****************************************************************************
+END PROGRAM WIND_SPEED_AND_DIRECTION
+! *****************************************************************************
